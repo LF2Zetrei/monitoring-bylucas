@@ -1,69 +1,88 @@
-import Image from "next/image";
+"use client";
 
-export default function Home() {
+import { useEffect, useState } from "react";
+import MetricCard from "@/components/MetricCard";
+import ServiceAccordion, { ServiceItem } from "@/components/ServiceAccordion";
+import InfraTags from "@/components/InfraTags";
+
+type Infra = {
+  ramPercent: number;
+  ramTotalMB: number;
+  diskPercent: number;
+};
+
+type InfraServiceItem = {
+  name: string;
+  kind: "systemd" | "docker";
+  status: string;
+};
+
+const REFRESH_INTERVAL_MS = 15000;
+
+export default function Dashboard() {
+  const [infra, setInfra] = useState<Infra | null>(null);
+  const [services, setServices] = useState<ServiceItem[]>([]);
+  const [infraServices, setInfraServices] = useState<InfraServiceItem[]>([]);
+
+  async function refresh() {
+    const [infraRes, servicesRes, infraServicesRes] = await Promise.all([
+      fetch("/api/infra"),
+      fetch("/api/services"),
+      fetch("/api/infra-services"),
+    ]);
+    setInfra(await infraRes.json());
+    setServices(await servicesRes.json());
+    setInfraServices(await infraServicesRes.json());
+  }
+
+  useEffect(() => {
+    // refresh() met à jour l'état de façon asynchrone (après les fetch) ;
+    // on la déclenche via une microtask plutôt que de l'appeler en direct,
+    // pour que l'effet ne fasse que "démarrer" la synchronisation, jamais
+    // de setState synchrone dans son corps.
+    Promise.resolve().then(refresh);
+    const interval = setInterval(refresh, REFRESH_INTERVAL_MS);
+    return () => clearInterval(interval);
+  }, []);
+
+  const alertsCount = services.filter((s) => s.status !== "active").length;
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert h-5 w-[100px]"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the{" "}
-            <code className="rounded bg-black/[.06] px-1.5 py-0.5 font-mono text-[0.9em] dark:bg-white/[.08]">
-              page.tsx
-            </code>{" "}
-            file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+    <main
+      style={{
+        fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+        background: "#ece9e5",
+        minHeight: "100vh",
+        padding: "2rem 1.5rem",
+      }}
+    >
+      <div style={{ maxWidth: 720, margin: "0 auto" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: "1.5rem" }}>
+          <span style={{ color: "#1e2130", fontSize: 20, fontWeight: 600 }}>Monitoring</span>
+          <span style={{ color: "#1e2130", opacity: 0.5, fontSize: 12 }}>bylucas.eu</span>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert h-[14px] w-4"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={14}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: "1.75rem" }}>
+          <MetricCard label="RAM" value={infra ? `${infra.ramPercent}%` : "—"} percent={infra?.ramPercent} />
+          <MetricCard label="Disque" value={infra ? `${infra.diskPercent}%` : "—"} percent={infra?.diskPercent} />
+          <MetricCard label="Services" value={`${services.length - alertsCount} / ${services.length}`} />
+          <MetricCard label="Alertes" value={String(alertsCount)} accent={alertsCount > 0} />
         </div>
-      </main>
-    </div>
+
+        <div style={{ color: "#1e2130", opacity: 0.5, fontSize: 11, letterSpacing: 1, marginBottom: 10 }}>
+          APPLICATIONS
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: "1.75rem" }}>
+          {services.map((s) => (
+            <ServiceAccordion key={s.name} service={s} />
+          ))}
+        </div>
+
+        <div style={{ color: "#1e2130", opacity: 0.5, fontSize: 11, letterSpacing: 1, marginBottom: 10 }}>
+          INFRASTRUCTURE
+        </div>
+        <InfraTags items={infraServices} />
+      </div>
+    </main>
   );
 }
