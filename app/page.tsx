@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import MetricCard from "@/components/MetricCard";
 import ServiceAccordion, { ServiceItem } from "@/components/ServiceAccordion";
 import InfraTags from "@/components/InfraTags";
+import MinecraftPanel from "@/components/MinecraftPanel";
 
 type Infra = {
   ramPercent: number;
@@ -76,6 +77,13 @@ export default function Dashboard() {
           {services.map((s) => (
             <ServiceAccordion key={s.name} service={s} />
           ))}
+        </div>
+
+        <div style={{ color: "#1e2130", opacity: 0.5, fontSize: 11, letterSpacing: 1, marginBottom: 10 }}>
+          MINECRAFT
+        </div>
+        <div style={{ marginBottom: "1.75rem" }}>
+          <MinecraftPanel />
         </div>
 
         <div style={{ color: "#1e2130", opacity: 0.5, fontSize: 11, letterSpacing: 1, marginBottom: 10 }}>
