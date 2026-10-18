@@ -15,7 +15,7 @@ export function sameOrigin(req: NextRequest): boolean {
 }
 
 export function forbidden() {
-  return NextResponse.json({ error: 'Origine refusée' }, { status: 403 });
+  return NextResponse.json({ error: 'Origin refused' }, { status: 403 });
 }
 
 // Journal d'audit : part dans journalctl -u monitoring.

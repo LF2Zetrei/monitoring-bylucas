@@ -12,8 +12,10 @@ of the VPS and every hosted project, and lets you act on them:
 - **restart** a project's service;
 - **re-install / issue the TLS certificate** of a subdomain when it's missing;
 - a **Minecraft panel** for the `homestead` server: status, players, memory,
-  uptime, start/stop/restart, switch CurseForge modpack, download the world
-  as a zip, replace the world with an uploaded zip.
+  uptime, start/stop/restart, a server console (RCON), switch CurseForge
+  modpack, download the world as a zip, replace it with an uploaded zip or a
+  new random world, and saved worlds grouped by modpack that can be restored
+  at any time.
 
 It is a **Next.js server app** (not a static export): its API routes run
 `systemctl`, `journalctl`, `docker`, `certbot` and `minecraft-ctl` on the VPS
@@ -80,12 +82,20 @@ monitoring/
 │           ├── route.ts                              GET  container status + players + config
 │           ├── power/route.ts                        POST start / stop / restart
 │           ├── modpack/route.ts                      POST save modpack + recreate container
+│           ├── console/route.ts                      POST run a server command (RCON)
+│           ├── backups/route.ts                      GET  saved worlds / POST save now
+│           ├── backups/restore/route.ts              POST restore a saved world
+│           ├── backups/delete/route.ts               POST delete a saved world
 │           └── world/
 │               ├── download/route.ts                 GET  stream the world as a zip
 │               ├── upload/route.ts                   PUT  receive a world zip (≤ 4 GB)
-│               └── import/route.ts                   POST validate + swap in the uploaded world
+│               ├── import/route.ts                   POST validate + swap in the uploaded world
+│               └── new/route.ts                      POST new random world
 └── components/
     ├── MinecraftPanel.tsx                # Minecraft section of the dashboard
+    ├── MinecraftConsole.tsx              # RCON console (inside the panel)
+    ├── MinecraftBackups.tsx              # Saved worlds grouped by modpack
+    ├── minecraftUi.ts                    # Shared styles + postJson helper of the panel
     ├── MetricCard.tsx                    # KPI tile (+ optional progress bar)
     ├── ServiceAccordion.tsx              # One project row: details, logs, actions
     └── InfraTags.tsx                     # Infra services / containers as tags
@@ -219,10 +229,15 @@ the `monitoring` project).
 
 | Export | Purpose |
 |---|---|
-| `CONTAINER`, `CONFIG_PATH`, `UPLOAD_PATH`, `MAX_UPLOAD_BYTES` | `homestead`, `/var/lib/minecraft-panel/config.json`, `/var/minecraft-uploads/incoming.zip`, 4 GB |
+| `CONTAINER`, `CONFIG_PATH`, `REQUEST_PATH`, `UPLOAD_PATH`, `MAX_UPLOAD_BYTES` | `homestead`, `/var/lib/minecraft-panel/config.json`, `/var/lib/minecraft-panel/request.json`, `/var/minecraft-uploads/incoming.zip`, 4 GB |
 | `readConfig()` | `{ slug, fileId }` from `config.json` (empty strings on error) |
 | `validConfig(slug, fileId)` | slug `^[a-z0-9][a-z0-9-]{0,79}$`, fileId empty or 1–10 digits (same regexes as `minecraft-ctl`) |
+| `validBackupId(id)` | `<slug or "unknown">/<YYYYMMDD-HHMMSS>` (same rule as `minecraft-ctl`) |
 | `ctl(sub)` | `sudo /usr/local/sbin/minecraft-ctl <sub>`, 10 min timeout. `sub` is a fixed union type matching the sudoers lines |
+| `ctlOnBackup(sub, id)` | Writes `{ id }` to `request.json`, then `ctl('restore-world' \| 'delete-backup')` — the sudoers allows no arguments, so the target goes through this file and is re-validated as root |
+| `ctlError(e, fallback)` | Last stderr line of `minecraft-ctl` (its messages are written for the UI, e.g. `another Minecraft operation is already running`) |
+| `listBackups()` | `ctl('list-backups')` → JSON `[{ id, slug, fileId, reason, createdAt, size }]`, newest first |
+| `rcon(command)` | `docker exec homestead rcon-cli <command>` (command = one argument, no shell), `§` color codes stripped |
 | `getStatus()` | `docker inspect` (state, health, start time, `CF_SLUG` env), and if running `docker stats` (memory) + `docker exec homestead rcon-cli list` (players) |
 
 ### Minecraft routes
@@ -237,9 +252,19 @@ otherwise) and writes an `audit` line on success.
 | `POST /api/minecraft/modpack` | Body `{ slug, fileId?, clean? }`, validated → writes `config.json` (0600) → `ctl('apply-clean' \| 'apply')` | `{ success: true }`, 400 invalid, 500 |
 | `GET /api/minecraft/world/download` | `spawn('sudo', ['minecraft-ctl', 'export-world'])`, stdout streamed as `homestead-world-<date>.zip` (`X-Accel-Buffering: no`) | `application/zip` |
 | `PUT /api/minecraft/world/upload` | Raw zip body streamed to `incoming.zip` (0600) through a byte counter; aborts and deletes the file above 4 GB. Applies nothing | `{ success, bytes }`, 413 too large, 500 |
-| `POST /api/minecraft/world/import` | `ctl('import-world')`: validation, stop, backup, swap, start (see the `minecraft-homestead` role in the infra README) | `{ success: true }`, or 400 with the last stderr line of the script (e.g. `level.dat introuvable...`) |
+| `POST /api/minecraft/world/import` | `ctl('import-world')`: validation, stop, backup, swap, start (see the `minecraft-homestead` role in the infra README) | `{ success: true }`, or 400 with the last stderr line of the script (e.g. `level.dat not found...`) |
+| `POST /api/minecraft/world/new` | `ctl('new-world')`: stop, backup, delete the world, empty `level-seed`, start → the server generates a new random world (same modpack) | `{ success: true }` or 500 |
+| `GET /api/minecraft/backups` | `listBackups()` | `Backup[]` or 500 |
+| `POST /api/minecraft/backups` | `ctl('save-world')`: hot manual save | `{ success: true }` or 500 |
+| `POST /api/minecraft/backups/restore` | Body `{ id }` → `ctlOnBackup('restore-world', id)`: saves the current world, swaps in the backup; if it belongs to another modpack, also switches `config.json` to that modpack, cleans mods and recreates the container | `{ success: true }`, 400 invalid id, 500 |
+| `POST /api/minecraft/backups/delete` | Body `{ id }` → `ctlOnBackup('delete-backup', id)` | `{ success: true }`, 400, 500 |
+| `POST /api/minecraft/console` | Body `{ command }`: leading `/` removed; must start with a letter (never a `-flag` for `rcon-cli`), ≤ 256 chars, no control characters (single line) → `rcon(command)` | `{ output }`, 400 invalid, 502 if the server is unreachable |
 
+Every error message of these routes is in English (shown as-is in the panel).
 Download is not origin-checked: it is a plain link (`GET`) and only reads.
+The console accepts **any** server command (`op`, `stop`, `ban`...): anyone
+past the basic auth is effectively a server operator. Each command is
+written to the audit log.
 
 ---
 
@@ -265,15 +290,24 @@ APPLICATIONS
  ● landing     static                          ▾
  ...
 MINECRAFT
- ● Homestead running · healthy        [Redémarrer] [Arrêter]   ← MinecraftPanel
- JOUEURS 0 / 20   MÉMOIRE 4.1GiB   UPTIME 23 j   MODPACK homestead-cozy
- CHANGER DE MODPACK  [slug] [file ID] [x] Nettoyer...  [Appliquer]
- MONDE  [Télécharger le monde (.zip)] [Remplacer le monde…]
+ ● Homestead running · healthy              [Restart] [Stop]   ← MinecraftPanel
+ PLAYERS 0 / 20   MEMORY 4.1GiB   UPTIME 23 d   MODPACK homestead-cozy
+ CONSOLE  ┌──────────────────────────┐                          ← MinecraftConsole
+          │ > list                   │
+          │ There are 0 of a max ... │
+          └──────────────────────────┘ [command…]  (list) (say) (time set day) ...
+ CHANGE MODPACK  [slug] [file ID] [x] Clean mods/...  [Apply]
+ WORLD  [Download world (.zip)] [Replace world…] [New random world]
+ SAVED WORLDS                                  [Save current world]  ← MinecraftBackups
+  homestead-cozy  current modpack                       3 saves ▴
+    18 Oct 2026, 19:09 · Before new world · 457 MB  [Restore] [Delete]
+  other-pack                                             1 save ▾
 INFRASTRUCTURE
  [nginx] [postgresql] [fail2ban] [docker] [warp10] [homestead]  ← InfraTags
 ```
 
-The UI text is in French ("Disque", "Alertes", "Redémarrer"...).
+The dashboard text is in French ("Disque", "Alertes", "Redémarrer"...),
+except the Minecraft panel, which is in English.
 
 ### `components/MetricCard.tsx`
 
@@ -307,22 +341,38 @@ One row per project; click to expand.
 
 ### `components/MinecraftPanel.tsx`
 
-Self-contained: polls `/api/minecraft` every **10 s** on its own.
+Self-contained: polls `/api/minecraft` and `/api/minecraft/backups` every
+**10 s** on its own. All actions go through one `run()` helper that keeps a
+single `busy` state for the whole panel (one action at a time; the server
+script also holds a lock) and shows the API message.
 
 - **Header**: dot (`running` green, `exited` gray, `absent` orange), status
-  and health; "Démarrer" when stopped, "Redémarrer" / "Arrêter" (with
-  confirm) when running.
+  and health; "Start" when stopped, "Restart" / "Stop" (with confirm) when
+  running.
 - **Stats**: players, memory used, uptime, running modpack (`CF_SLUG` of the
   container).
-- **Changer de modpack**: CurseForge slug + optional file ID (pre-filled
-  once from `config.json`), "Nettoyer mods/ et config/" checkbox (checked by
+- **Console** (`MinecraftConsole.tsx`): output area (commands in green,
+  errors in orange, last 200 lines, "Clear"), input disabled while the
+  server is stopped, ↑/↓ command history (50). The shortcut chips (`list`,
+  `say`, `time set day`, `whitelist add`, `op`...) only fill the input;
+  nothing is sent without Enter. The history lives in the page only.
+- **Change modpack**: CurseForge slug + optional file ID (pre-filled once
+  from `config.json`), "Clean mods/ and config/" checkbox (checked by
   default, recommended when switching to another modpack). Confirm →
   `POST /modpack`. The server then re-downloads the modpack (a few minutes).
-- **Monde**: "Télécharger" is a link to `/world/download` (hot copy, autosave
-  paused a few seconds). "Remplacer le monde…" picks a `.zip`, confirms,
+- **World**: "Download world" is a link to `/world/download` (hot copy,
+  autosave paused a few seconds). "Replace world…" picks a `.zip`, confirms,
   sends it with `XMLHttpRequest` `PUT /world/upload` (progress shown in %),
   then `POST /world/import`. The zip may contain the world folder or its
-  content directly; it must contain `level.dat`.
+  content directly; it must contain `level.dat`. "New random world" →
+  confirm → `POST /world/new`.
+- **Saved worlds** (`MinecraftBackups.tsx`): one collapsible group per
+  modpack (current modpack first and expanded, others alphabetical). Each
+  save shows its date, why it was made (manual, before upload, before new
+  world, before modpack change, before restore), size and file ID.
+  "Restore" warns when the save belongs to another modpack (the server
+  will switch to it); "Delete" asks for confirmation. "Save current world"
+  makes a manual save.
 
 ---
 
@@ -364,7 +414,8 @@ The app runs as `lucas` (systemd `User=lucas`). What each feature needs:
 | `certificateExists` | Traverse `/etc/letsencrypt/live/` | Root-only by default — see §11 |
 | Minecraft status / players | `docker inspect`, `docker stats`, `docker exec ... rcon-cli` (`docker` group) | Ansible `docker` role |
 | Minecraft config / upload | Write `/var/lib/minecraft-panel/` and `/var/minecraft-uploads/` (owned by `lucas`, 0700) | Ansible `minecraft-homestead` |
-| Minecraft actions | sudoers `minecraft-ctl start\|stop\|restart\|apply\|apply-clean\|export-world\|import-world` | Ansible `minecraft-homestead` |
+| Minecraft actions | sudoers `minecraft-ctl start\|stop\|restart\|apply\|apply-clean\|export-world\|import-world\|new-world\|save-world\|list-backups\|restore-world\|delete-backup` | Ansible `minecraft-homestead` |
+| Minecraft console | `docker exec homestead rcon-cli` (`docker` group, no sudo) | Ansible `docker` role |
 | World upload/download | nginx `client_max_body_size 4g`, no buffering (`large_transfers: true`) | Ansible `app-deploy` (added by hand on the current VPS, see infra README §11) |
 
 ---
@@ -464,6 +515,11 @@ them on the VPS before fixing.
   `minecraft-ctl`, so the panel shows `absent` and every action fails.
 - **Minecraft world upload needs free disk space** for the zip plus the
   unzipped world plus a backup, all on the VPS disk.
+- **Saved worlds take disk space**: up to 5 automatic saves per modpack plus
+  every manual save (≈ 450 MB compressed each for the current world). Delete
+  old ones from the panel; nothing warns when the disk fills up.
+- **The console is not a live log**: it shows the reply of each command, not
+  the server output (chat, joins...).
 - **Static projects always "active"**: no check is made that the folder
   is non-empty or that the site answers. An HTTP check against
   `https://<subdomain>` would be more honest.

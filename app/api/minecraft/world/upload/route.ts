@@ -32,6 +32,6 @@ export async function PUT(req: NextRequest) {
   } catch (e) {
     fs.rmSync(UPLOAD_PATH, { force: true });
     const tooLarge = (e as Error)?.message === 'too-large';
-    return NextResponse.json({ error: tooLarge ? 'Fichier trop gros (max 4 Go)' : 'Échec de l\'envoi' }, { status: tooLarge ? 413 : 500 });
+    return NextResponse.json({ error: tooLarge ? 'File too large (max 4 GB)' : 'Upload failed' }, { status: tooLarge ? 413 : 500 });
   }
 }

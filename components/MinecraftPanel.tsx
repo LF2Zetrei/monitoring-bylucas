@@ -1,6 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import MinecraftBackups, { Backup } from "./MinecraftBackups";
+import MinecraftConsole from "./MinecraftConsole";
+import { BTN, INPUT, LABEL, SECTION, VALUE, postJson } from "./minecraftUi";
 
 type McStatus = {
   status: string;
@@ -13,28 +16,17 @@ type McStatus = {
 };
 
 const COLOR: Record<string, string> = { running: "#639922", exited: "#888780", absent: "#d85a30" };
-const LABEL = { color: "#1e2130", opacity: 0.4, fontSize: 10 } as const;
-const VALUE = { color: "#1e2130", fontSize: 13, fontWeight: 500 } as const;
-const BTN = (primary = false, danger = false) =>
-  ({
-    fontSize: 12,
-    padding: "6px 14px",
-    borderRadius: 6,
-    border: primary ? "none" : "1px solid #d9d7d0",
-    background: danger ? "#d85a30" : primary ? "#1e2130" : "#fff",
-    color: primary || danger ? "#fff" : "#1e2130",
-    cursor: "pointer",
-  }) as const;
 
 function uptime(startedAt: string | null) {
   if (!startedAt) return "—";
   const min = Math.floor((Date.now() - new Date(startedAt).getTime()) / 60000);
   if (min < 60) return `${min} min`;
-  return min < 1440 ? `${Math.floor(min / 60)} h ${min % 60} min` : `${Math.floor(min / 1440)} j`;
+  return min < 1440 ? `${Math.floor(min / 60)} h ${min % 60} min` : `${Math.floor(min / 1440)} d`;
 }
 
 export default function MinecraftPanel() {
   const [s, setS] = useState<McStatus | null>(null);
+  const [backups, setBackups] = useState<Backup[] | "error" | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [slug, setSlug] = useState("");
@@ -46,8 +38,10 @@ export default function MinecraftPanel() {
 
   async function refresh() {
     try {
-      const data: McStatus = await (await fetch("/api/minecraft")).json();
+      const [statusRes, backupsRes] = await Promise.all([fetch("/api/minecraft"), fetch("/api/minecraft/backups")]);
+      const data: McStatus = await statusRes.json();
       setS(data);
+      setBackups(backupsRes.ok ? await backupsRes.json() : "error");
       if (!formInit.current) {
         setSlug(data.config.slug);
         setFileId(data.config.fileId);
@@ -63,38 +57,34 @@ export default function MinecraftPanel() {
     return () => clearInterval(t);
   }, []);
 
-  async function post(url: string, body: unknown, label: string, okMsg: string) {
+  // Une action à la fois pour tout le panneau (le script serveur a aussi un verrou).
+  async function run(label: string, url: string, body: unknown, okMsg: string) {
     setBusy(label);
     setMsg(null);
-    try {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      const data = await res.json().catch(() => ({}));
-      setMsg(res.ok ? okMsg : data.error || "Échec");
-    } catch {
-      setMsg("Échec");
-    } finally {
-      setBusy(null);
-      refresh();
-    }
+    const error = await postJson(url, body);
+    setMsg(error ?? okMsg);
+    setBusy(null);
+    refresh();
   }
 
-  const power = (action: string, okMsg: string) => post("/api/minecraft/power", { action }, action, okMsg);
+  const power = (action: string, okMsg: string) => run(action, "/api/minecraft/power", { action }, okMsg);
 
   function applyModpack() {
     const warn = clean
-      ? "Le monde sera sauvegardé, puis mods/ et config/ supprimés avant de réinstaller le modpack. Continuer ?"
-      : "Le serveur va être recréé avec ce modpack (mods existants conservés). Continuer ?";
+      ? "The world will be saved, then mods/ and config/ deleted before installing the modpack. Continue?"
+      : "The server will be recreated with this modpack (existing mods kept). Continue?";
     if (!confirm(warn)) return;
-    post("/api/minecraft/modpack", { slug, fileId, clean }, "modpack", "Modpack appliqué, le serveur redémarre (installation : quelques minutes)");
+    run("modpack", "/api/minecraft/modpack", { slug, fileId, clean }, "Modpack applied, server restarting (install takes a few minutes)");
+  }
+
+  function newWorld() {
+    if (!confirm("Generate a new random world? The current world is saved first (see Saved worlds) and the server restarts.")) return;
+    run("new-world", "/api/minecraft/world/new", {}, "New world generating, server restarting");
   }
 
   function uploadWorld(file: File) {
-    if (!file.name.toLowerCase().endsWith(".zip")) return setMsg("Choisis un fichier .zip");
-    if (!confirm(`Remplacer le monde actuel par "${file.name}" ? L'ancien est sauvegardé (5 dernières sauvegardes conservées) et le serveur sera redémarré.`)) return;
+    if (!file.name.toLowerCase().endsWith(".zip")) return setMsg("Pick a .zip file");
+    if (!confirm(`Replace the current world with "${file.name}"? The current world is saved first and the server restarts.`)) return;
     setMsg(null);
     setProgress(0);
     const xhr = new XMLHttpRequest();
@@ -103,21 +93,24 @@ export default function MinecraftPanel() {
     xhr.onload = async () => {
       setProgress(null);
       if (xhr.status !== 200) {
-        setMsg(JSON.parse(xhr.responseText || "{}").error || "Échec de l'envoi");
+        let error = "Upload failed";
+        try {
+          error = JSON.parse(xhr.responseText).error || error;
+        } catch {}
+        setMsg(error);
         return;
       }
-      await post("/api/minecraft/world/import", {}, "import", "Monde remplacé, le serveur redémarre");
+      await run("import", "/api/minecraft/world/import", {}, "World replaced, server restarting");
     };
     xhr.onerror = () => {
       setProgress(null);
-      setMsg("Échec de l'envoi");
+      setMsg("Upload failed");
     };
     xhr.setRequestHeader("Content-Type", "application/zip");
     xhr.send(file);
   }
 
   const running = s?.status === "running";
-  const input = { fontSize: 12, padding: "6px 10px", borderRadius: 6, border: "1px solid #d9d7d0", width: "100%", boxSizing: "border-box" } as const;
   const dirty = s && s.runningSlug && s.runningSlug !== s.config.slug;
 
   return (
@@ -131,63 +124,70 @@ export default function MinecraftPanel() {
         <div style={{ display: "flex", gap: 8 }}>
           {running ? (
             <>
-              <button style={BTN()} disabled={!!busy} onClick={() => power("restart", "Redémarré")}>
-                {busy === "restart" ? "…" : "Redémarrer"}
+              <button style={BTN()} disabled={!!busy} onClick={() => power("restart", "Restarted")}>
+                {busy === "restart" ? "…" : "Restart"}
               </button>
               <button
                 style={BTN(false, true)}
                 disabled={!!busy}
-                onClick={() => confirm("Arrêter le serveur ? Les joueurs connectés seront déconnectés.") && power("stop", "Arrêté")}
+                onClick={() => confirm("Stop the server? Connected players will be disconnected.") && power("stop", "Stopped")}
               >
-                {busy === "stop" ? "Arrêt…" : "Arrêter"}
+                {busy === "stop" ? "Stopping…" : "Stop"}
               </button>
             </>
           ) : (
-            <button style={BTN(true)} disabled={!!busy} onClick={() => power("start", "Démarrage en cours")}>
-              {busy === "start" ? "…" : "Démarrer"}
+            <button style={BTN(true)} disabled={!!busy} onClick={() => power("start", "Starting")}>
+              {busy === "start" ? "…" : "Start"}
             </button>
           )}
         </div>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10, marginBottom: 16 }}>
-        <div><div style={LABEL}>JOUEURS</div><div style={VALUE}>{s?.players ?? "—"}</div></div>
-        <div><div style={LABEL}>MÉMOIRE</div><div style={VALUE}>{s?.memory?.split(" / ")[0] ?? "—"}</div></div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10 }}>
+        <div><div style={LABEL}>PLAYERS</div><div style={VALUE}>{s?.players ?? "—"}</div></div>
+        <div><div style={LABEL}>MEMORY</div><div style={VALUE}>{s?.memory?.split(" / ")[0] ?? "—"}</div></div>
         <div><div style={LABEL}>UPTIME</div><div style={VALUE}>{running ? uptime(s!.startedAt) : "—"}</div></div>
         <div><div style={LABEL}>MODPACK</div><div style={VALUE}>{s?.runningSlug ?? "—"}</div></div>
       </div>
 
-      <div style={{ borderTop: "1px solid #ece9e5", paddingTop: 14, marginBottom: 14 }}>
-        <div style={{ ...LABEL, marginBottom: 8 }}>CHANGER DE MODPACK</div>
+      <MinecraftConsole running={running} />
+
+      <div style={SECTION}>
+        <div style={{ ...LABEL, marginBottom: 8 }}>CHANGE MODPACK</div>
         <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 8, marginBottom: 8 }}>
-          <input style={input} value={slug} onChange={(e) => setSlug(e.target.value.trim())} placeholder="slug CurseForge (ex: homestead-cozy)" />
-          <input style={input} value={fileId} onChange={(e) => setFileId(e.target.value.trim())} placeholder="ID fichier (optionnel)" />
+          <input style={INPUT} value={slug} onChange={(e) => setSlug(e.target.value.trim())} placeholder="CurseForge slug (e.g. homestead-cozy)" />
+          <input style={INPUT} value={fileId} onChange={(e) => setFileId(e.target.value.trim())} placeholder="File ID (optional)" />
         </div>
         <label style={{ fontSize: 12, color: "#1e2130", display: "flex", gap: 6, alignItems: "center", marginBottom: 8 }}>
           <input type="checkbox" checked={clean} onChange={(e) => setClean(e.target.checked)} />
-          Nettoyer mods/ et config/ (recommandé si c&apos;est un autre modpack)
+          Clean mods/ and config/ (recommended when switching to another modpack)
         </label>
         <button style={BTN(true)} disabled={!!busy || !slug} onClick={applyModpack}>
-          {busy === "modpack" ? "Application…" : "Appliquer"}
+          {busy === "modpack" ? "Applying…" : "Apply"}
         </button>
-        {dirty && <span style={{ ...LABEL, fontSize: 11, marginLeft: 10 }}>en cours : {s!.runningSlug}</span>}
+        {dirty && <span style={{ ...LABEL, fontSize: 11, marginLeft: 10 }}>running: {s!.runningSlug}</span>}
       </div>
 
-      <div style={{ borderTop: "1px solid #ece9e5", paddingTop: 14 }}>
-        <div style={{ ...LABEL, marginBottom: 8 }}>MONDE</div>
+      <div style={SECTION}>
+        <div style={{ ...LABEL, marginBottom: 8 }}>WORLD</div>
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
           <a href="/api/minecraft/world/download" style={{ ...BTN(), textDecoration: "none", display: "inline-block" }}>
-            Télécharger le monde (.zip)
+            Download world (.zip)
           </a>
           <button style={BTN()} disabled={!!busy || progress !== null} onClick={() => fileRef.current?.click()}>
-            {progress !== null ? `Envoi ${progress}%` : busy === "import" ? "Import…" : "Remplacer le monde…"}
+            {progress !== null ? `Uploading ${progress}%` : busy === "import" ? "Importing…" : "Replace world…"}
+          </button>
+          <button style={BTN()} disabled={!!busy || progress !== null} onClick={newWorld}>
+            {busy === "new-world" ? "Generating…" : "New random world"}
           </button>
           <input ref={fileRef} type="file" accept=".zip" hidden onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadWorld(f); e.target.value = ""; }} />
         </div>
         <div style={{ ...LABEL, fontSize: 11, marginTop: 8 }}>
-          Le téléchargement est une copie à chaud (sauvegardes auto suspendues quelques secondes).
+          The download is a hot copy (autosave paused for a few seconds).
         </div>
       </div>
+
+      <MinecraftBackups backups={backups} runningSlug={s?.runningSlug ?? null} busy={busy} run={run} />
 
       {msg && <div style={{ color: "#1e2130", fontSize: 12, marginTop: 12 }}>{msg}</div>}
     </div>
